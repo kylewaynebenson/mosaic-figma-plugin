@@ -144,30 +144,16 @@
 </head>
 <body>
     <div class="section">
-        <div class="form-group">
-            <label for="tile-size">Tile Size (px)</label>
-            <input type="number" id="tile-size" value="50" min="10" max="200">
-        </div>
         
         <div class="form-group">
-            <label for="component-source">Component Source</label>
-            <select id="component-source">
-                <option value="current-page">Current Page</option>
-                <option value="specific-library">Specific Library</option>
-            </select>
-        </div>
-
-        <div id="library-selection" style="display: none;">
-            <div class="form-group">
-                <label for="library-name">Library</label>
-                <select id="library-name"></select>
-            </div>
+            <label for="component-name">Component</label>
+            <select id="component-name"></select>
         </div>
 
         <div class="form-group">
             <label class="checkbox-label">
                 <input type="checkbox" id="use-variants" checked>
-                Use component variants
+                Use all variants (recommended)
             </label>
         </div>
     </div>
@@ -175,24 +161,23 @@
     <div class="divider"></div>
 
     <div class="section">
-        <div class="toggle-header" id="show-advanced">
-            <span class="section-title">Advanced Options</span>
-            <span class="toggle-icon">▼</span>
-        </div>
-        
-        <div class="toggle-content" id="advanced-options">
-            <div class="row">
-                <div class="col">
-                    <div class="form-group">
-                        <label for="enlargement">Scale</label>
-                        <input type="number" id="enlargement" value="8" min="1" max="20">
-                    </div>
+        <div class="row">
+            <div class="col">
+                <div class="form-group">
+                    <label for="tile-size">Tile Size (px)</label>
+                    <input type="number" id="tile-size" value="50" min="10" max="200">
                 </div>
-                <div class="col">
-                    <div class="form-group">
-                        <label for="match-resolution">Resolution</label>
-                        <input type="number" id="match-resolution" value="5" min="1" max="10">
-                    </div>
+            </div>
+            <div class="col">
+                <div class="form-group">
+                    <label for="enlargement">Scale</label>
+                    <input type="number" id="enlargement" value="2" min="1" max="20">
+                </div>
+            </div>
+            <div class="col">
+                <div class="form-group">
+                    <label for="match-resolution">Resolution</label>
+                    <input type="number" id="match-resolution" value="5" min="1" max="10">
                 </div>
             </div>
         </div>
@@ -201,32 +186,332 @@
     <button id="create-mosaic">Create Mosaic</button>
 
     <script>
-        document.getElementById('component-source').addEventListener('change', function() {
-            const librarySelection = document.getElementById('library-selection');
-            librarySelection.style.display = 
-                this.value === 'specific-library' ? 'block' : 'none';
-        });
-
-        document.getElementById('show-advanced').addEventListener('click', function() {
-            const advancedOptions = document.getElementById('advanced-options');
-            const toggleIcon = this.querySelector('.toggle-icon');
-            const isHidden = advancedOptions.style.display === 'none' || advancedOptions.style.display === '';
+        // Function to calculate component brightness using Canvas API
+        async function calculateComponentBrightness(bytes) {
+            return new Promise((resolve, reject) => {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                
+                // Create an image from the bytes
+                const blob = new Blob([bytes], { type: 'image/png' });
+                const url = URL.createObjectURL(blob);
+                const img = new Image();
+                
+                img.onload = () => {
+                    try {
+                        // Resize canvas to match image
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        
+                        // Draw the image on the canvas
+                        ctx.drawImage(img, 0, 0);
+                        
+                        // Calculate brightness using image data
+                        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                        
+                        // For component brightness, we specifically need to consider transparency
+                        // We need to calculate the average brightness of non-transparent pixels
+                        // This is how the real appearance/contrast of the component is determined
+                        let totalBrightness = 0;
+                        let totalPixels = 0;
+                        let transparentPixels = 0;
+                        
+                        // Process all pixels
+                        for (let i = 0; i < imageData.length; i += 4) {
+                            const r = imageData[i] / 255;
+                            const g = imageData[i + 1] / 255;
+                            const b = imageData[i + 2] / 255;
+                            const a = imageData[i + 3] / 255;
+                            
+                            // Skip fully transparent pixels
+                            if (a < 0.1) {
+                                transparentPixels++;
+                                continue;
+                            }
+                            
+                            // Calculate perceived brightness (considering alpha)
+                            // Use the formula that's more sensitive to green (human eye sensitivity)
+                            const brightness = (0.299 * r + 0.587 * g + 0.114 * b) * a;
+                            totalBrightness += brightness;
+                            totalPixels++;
+                        }
+                        
+                        // Calculate average brightness (only of visible pixels)
+                        let avgBrightness;
+                        if (totalPixels > 0) {
+                            avgBrightness = totalBrightness / totalPixels;
+                        } else {
+                            // If all pixels are transparent, consider it bright (like empty space)
+                            avgBrightness = 1.0;
+                        }
+                        
+                        // For components with transparency, factor in the amount of transparency
+                        // More transparent components should be considered brighter
+                        const transparencyRatio = transparentPixels / (imageData.length / 4);
+                        
+                        // Adjust brightness: opaque dark components are darkest,
+                        // while more transparent components appear brighter
+                        const adjustedBrightness = avgBrightness + (transparencyRatio * 0.5);
+                        
+                        // Ensure the brightness is within 0-1 range
+                        const finalBrightness = Math.max(0, Math.min(1, adjustedBrightness));
+                        
+                        // Clean up
+                        URL.revokeObjectURL(url);
+                        
+                        // Return brightness
+                        resolve(finalBrightness);
+                    } catch (e) {
+                        URL.revokeObjectURL(url);
+                        reject(e);
+                    }
+                };
+                
+                img.onerror = (err) => {
+                    URL.revokeObjectURL(url);
+                    reject(err);
+                };
+                
+                img.src = url;
+            });
+        }
+        
+        // Function to calculate image brightness map
+        async function calculateImageBrightnessMap(bytes, gridSize) {
+            return new Promise((resolve, reject) => {
+                const canvas = document.createElement('canvas');
+                const ctx = canvas.getContext('2d');
+                
+                // Create an image from the bytes
+                const blob = new Blob([bytes], { type: 'image/png' });
+                const url = URL.createObjectURL(blob);
+                const img = new Image();
+                
+                img.onload = () => {
+                    try {
+                        // Resize canvas to match image
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        
+                        // Draw the image on the canvas
+                        ctx.drawImage(img, 0, 0);
+                        
+                        // Calculate brightness for each grid cell
+                        const brightnessMap = [];
+                        const cellWidth = img.width / gridSize.width;
+                        const cellHeight = img.height / gridSize.height;
+                        
+                        for (let y = 0; y < gridSize.height; y++) {
+                            brightnessMap[y] = [];
+                            for (let x = 0; x < gridSize.width; x++) {
+                                // Get image data for this grid cell
+                                const imageData = ctx.getImageData(
+                                    x * cellWidth, 
+                                    y * cellHeight, 
+                                    cellWidth, 
+                                    cellHeight
+                                ).data;
+                                
+                                // Calculate average brightness for this cell
+                                let totalBrightness = 0;
+                                let totalPixels = 0;
+                                
+                                // Sample pixels (process every 4th pixel to improve performance)
+                                for (let i = 0; i < imageData.length; i += 16) {
+                                    const r = imageData[i] / 255;
+                                    const g = imageData[i + 1] / 255;
+                                    const b = imageData[i + 2] / 255;
+                                    const a = imageData[i + 3] / 255;
+                                    
+                                    // Consider alpha channel for semi-transparent images
+                                    const brightness = (0.299 * r + 0.587 * g + 0.114 * b) * a;
+                                    totalBrightness += brightness;
+                                    totalPixels++;
+                                }
+                                
+                                // Store average brightness for this cell
+                                brightnessMap[y][x] = totalPixels > 0 ? 
+                                    totalBrightness / totalPixels : 0.5;
+                            }
+                        }
+                        
+                        // Clean up
+                        URL.revokeObjectURL(url);
+                        
+                        // Return brightness map
+                        resolve(brightnessMap);
+                    } catch (e) {
+                        URL.revokeObjectURL(url);
+                        reject(e);
+                    }
+                };
+                
+                img.onerror = (err) => {
+                    URL.revokeObjectURL(url);
+                    reject(err);
+                };
+                
+                img.src = url;
+            });
+        }
+    
+        // Handle messages from the plugin
+        window.onmessage = async (event) => {
+            const message = event.data.pluginMessage;
             
-            advancedOptions.style.display = isHidden ? 'block' : 'none';
-            toggleIcon.textContent = isHidden ? '▲' : '▼';
-            toggleIcon.style.transform = isHidden ? 'rotate(0deg)' : 'rotate(0deg)';
-        });
-
+            if (message.type === 'current-page-components') {
+                const componentSelect = document.getElementById('component-name');
+                componentSelect.innerHTML = '';
+                
+                // Add default option
+                const defaultOption = document.createElement('option');
+                defaultOption.value = '';
+                defaultOption.textContent = 'Select a component...';
+                componentSelect.appendChild(defaultOption);
+                
+                // Add components to select
+                message.components.forEach(component => {
+                    const option = document.createElement('option');
+                    option.value = component.id;
+                    option.textContent = component.name;
+                    componentSelect.appendChild(option);
+                });
+            }
+            
+            // Handle process-image request
+            if (message.type === 'process-image') {
+                try {
+                    const brightnessMap = await calculateImageBrightnessMap(
+                        message.bytes,
+                        message.gridSize
+                    );
+                    
+                    // Send result back to plugin
+                    parent.postMessage({
+                        pluginMessage: {
+                            type: 'brightness-map-result',
+                            brightnessMap
+                        }
+                    }, '*');
+                } catch (error) {
+                    console.error('Error processing image:', error);
+                    // Send a default brightness map
+                    const defaultMap = [];
+                    for (let y = 0; y < message.gridSize.height; y++) {
+                        defaultMap[y] = [];
+                        for (let x = 0; x < message.gridSize.width; x++) {
+                            defaultMap[y][x] = 0.5;
+                        }
+                    }
+                    parent.postMessage({
+                        pluginMessage: {
+                            type: 'brightness-map-result',
+                            brightnessMap: defaultMap
+                        }
+                    }, '*');
+                }
+            }
+            
+            // Handle process-component request
+            if (message.type === 'process-component') {
+                try {
+                    const brightness = await calculateComponentBrightness(message.bytes);
+                    
+                    // Send result back to plugin
+                    parent.postMessage({
+                        pluginMessage: {
+                            type: 'component-brightness-result',
+                            componentId: message.componentId,
+                            brightness
+                        }
+                    }, '*');
+                } catch (error) {
+                    console.error('Error calculating component brightness:', error);
+                    // Send back default brightness value
+                    parent.postMessage({
+                        pluginMessage: {
+                            type: 'component-brightness-result',
+                            componentId: message.componentId,
+                            brightness: 0.5 // Default middle brightness
+                        }
+                    }, '*');
+                }
+            }
+            
+            // Handle other message types as needed
+            if (message.type === 'calculate-component-brightness') {
+                try {
+                    const brightness = await calculateComponentBrightness(message.bytes);
+                    
+                    // Send result back to plugin
+                    parent.postMessage({
+                        pluginMessage: {
+                            type: 'component-brightness-result',
+                            requestId: message.requestId,
+                            brightness
+                        }
+                    }, '*');
+                } catch (error) {
+                    console.error('Error calculating component brightness:', error);
+                    parent.postMessage({
+                        pluginMessage: {
+                            type: 'component-brightness-result',
+                            requestId: message.requestId,
+                            brightness: 0.5
+                        }
+                    }, '*');
+                }
+            }
+            
+            if (message.type === 'calculate-image-brightness') {
+                try {
+                    const brightnessMap = await calculateImageBrightnessMap(
+                        message.bytes,
+                        message.gridSize
+                    );
+                    
+                    parent.postMessage({
+                        pluginMessage: {
+                            type: 'image-brightness-map-result',
+                        requestId: message.requestId,
+                        brightnessMap
+                    }
+                    }, '*');
+                } catch (error) {
+                    console.error('Error calculating image brightness map:', error);
+                    const defaultMap = [];
+                    for (let y = 0; y < message.gridSize.height; y++) {
+                        defaultMap[y] = [];
+                        for (let x = 0; y < message.gridSize.width; x++) {
+                            defaultMap[y][x] = 0.5;
+                        }
+                    }
+                    
+                    parent.postMessage({
+                        pluginMessage: {
+                            type: 'image-brightness-map-result',
+                            requestId: message.requestId,
+                            brightnessMap: defaultMap
+                        }
+                    }, '*');
+                }
+            }
+        };
+    
         document.getElementById('create-mosaic').addEventListener('click', () => {
             const config = {
                 tileSize: parseInt(document.getElementById('tile-size').value),
-                componentSource: document.getElementById('component-source').value,
-                libraryName: document.getElementById('library-name').value,
+                componentId: document.getElementById('component-name').value,
                 enlargement: parseInt(document.getElementById('enlargement').value),
                 matchResolution: parseInt(document.getElementById('match-resolution').value),
                 useComponentVariants: document.getElementById('use-variants').checked
             };
-
+    
+            if (!config.componentId) {
+                alert('Please select a component');
+                return;
+            }
+    
             parent.postMessage({ 
                 pluginMessage: { 
                     type: 'create-mosaic', 
@@ -234,26 +519,13 @@
                 } 
             }, '*');
         });
-
-        // Request libraries from plugin code
+    
+        // Request components from current page
         parent.postMessage({ 
             pluginMessage: { 
-                type: 'get-libraries' 
+                type: 'get-current-page-components' 
             } 
         }, '*');
-
-        // Listen for library response
-        window.onmessage = (event) => {
-            if (event.data.pluginMessage.type === 'libraries-list') {
-                const librarySelect = document.getElementById('library-name');
-                event.data.pluginMessage.libraries.forEach(library => {
-                    const option = document.createElement('option');
-                    option.value = library.id;
-                    option.textContent = library.name;
-                    librarySelect.appendChild(option);
-                });
-            }
-        };
     </script>
 </body>
 </html>
