@@ -9,6 +9,7 @@ interface MosaicConfig {
   useComponentVariants: boolean;
   imageTransparencyIsWhite: boolean;
   componentTransparencyIsWhite: boolean;
+  variationCount: number;
 }
 
 // Updated data structures for cell and component data
@@ -203,6 +204,152 @@ async function getComponentData(
   return results;
 }
 
+// Helper function to create variations of the mosaic
+async function createMosaicVariations(
+  baseFrame: FrameNode, 
+  imageData: CellData[][], 
+  componentLibrary: ComponentData[],
+  config: MosaicConfig,
+  xTileCount: number,
+  yTileCount: number,
+  variationCount: number
+) {
+  // Skip if only one variation requested (original already created)
+  if (variationCount <= 1) return;
+  
+  figma.notify(`Creating ${variationCount - 1} variations...`, {timeout: 2000});
+  
+  // Create a parent frame to hold all mosaics
+  const parentFrame = figma.createFrame();
+  parentFrame.name = 'Mosaic Variations';
+  
+  // Calculate size based on original mosaic
+  const mosaicWidth = baseFrame.width;
+  const mosaicHeight = baseFrame.height;
+  const parentWidth = mosaicWidth;
+  const parentHeight = mosaicHeight * variationCount + (20 * (variationCount - 1)); // Add spacing between variations
+  
+  parentFrame.resize(parentWidth, parentHeight);
+  parentFrame.x = baseFrame.x;
+  parentFrame.y = baseFrame.y;
+  
+  // Add original mosaic to the parent frame
+  figma.currentPage.appendChild(parentFrame);
+  
+  const originalMosaic = baseFrame.clone();
+  originalMosaic.x = 0;
+  originalMosaic.y = 0;
+  parentFrame.appendChild(originalMosaic);
+  baseFrame.remove(); // Remove the original standalone mosaic
+  
+  // Keep track of existing instance placements
+  const instanceMap = new Map<string, ComponentNode>();
+  
+  // Build a map of the original mosaic components
+  originalMosaic.children.forEach((child, index) => {
+    if (child.type === 'INSTANCE') {
+      const x = Math.floor(child.x / config.tileSize);
+      const y = Math.floor(child.y / config.tileSize);
+      instanceMap.set(`${x},${y}`, child.mainComponent);
+    }
+  });
+  
+  // Create each variation
+  for (let i = 1; i < variationCount; i++) {
+    try {
+      // Create new mosaic (clone the original)
+      const newMosaic = originalMosaic.clone();
+      newMosaic.name = `Mosaic Variation ${i + 1}`;
+      newMosaic.y = i * (mosaicHeight + 20); // Position below previous, with spacing
+      parentFrame.appendChild(newMosaic);
+      
+      // Replace 5-10% of instances randomly
+      const replacementPercentage = 5 + Math.floor(Math.random() * 6); // 5-10%
+      const totalInstances = xTileCount * yTileCount;
+      const numToReplace = Math.floor((replacementPercentage / 100) * totalInstances);
+      
+      // Choose random positions to replace
+      const positionsToReplace = new Set<string>();
+      while (positionsToReplace.size < numToReplace) {
+        const x = Math.floor(Math.random() * xTileCount);
+        const y = Math.floor(Math.random() * yTileCount);
+        positionsToReplace.add(`${x},${y}`);
+      }
+      
+      // Replace selected components with better alternatives
+      positionsToReplace.forEach(posKey => {
+        const [xStr, yStr] = posKey.split(',');
+        const x = parseInt(xStr);
+        const y = parseInt(yStr);
+        
+        // Find the instance at this position
+        const instance = newMosaic.children.find(child => {
+          return child.type === 'INSTANCE' && 
+                 Math.floor(child.x / config.tileSize) === x && 
+                 Math.floor(child.y / config.tileSize) === y;
+        }) as InstanceNode;
+        
+        if (!instance) return; // Skip if not found
+        
+        // Get image data for this position
+        const mapX = Math.min(imageData[0].length - 1, Math.floor(x * imageData[0].length / xTileCount));
+        const mapY = Math.min(imageData.length - 1, Math.floor(y * imageData.length / yTileCount));
+        const cellData = imageData[mapY][mapX];
+        
+        // Find a different component with a good match but not the exact same component
+        const currentComponent = instance.mainComponent;
+        const alternativeComponents = componentLibrary
+          .filter(comp => comp.component.id !== currentComponent.id)
+          .map(comp => {
+            // Calculate brightness and color differences
+            const brightnessDiff = Math.abs(cellData.brightness - comp.brightness);
+            const colorDiff = Math.sqrt(
+              Math.pow(cellData.color.r - comp.color.r, 2) +
+              Math.pow(cellData.color.g - comp.color.g, 2) +
+              Math.pow(cellData.color.b - comp.color.b, 2)
+            ) / Math.sqrt(3);
+            
+            // Combined score (lower is better)
+            const score = brightnessDiff * 0.6 + colorDiff * 0.4;
+            
+            return {
+              component: comp.component,
+              score
+            };
+          });
+        
+        // Sort by score (best matches first)
+        alternativeComponents.sort((a, b) => a.score - b.score);
+        
+        // Pick one of the top 3 alternatives to introduce more randomness
+        const randomIndex = Math.floor(Math.random() * Math.min(3, alternativeComponents.length));
+        const selectedComponent = alternativeComponents[randomIndex]?.component;
+        
+        if (selectedComponent) {
+          // Replace the instance
+          const newInstance = selectedComponent.createInstance();
+          newInstance.x = instance.x;
+          newInstance.y = instance.y;
+          newInstance.resize(config.tileSize, config.tileSize);
+          
+          // Add new instance and remove old one
+          newMosaic.appendChild(newInstance);
+          instance.remove();
+        }
+      });
+      
+      // Let the UI update between variations
+      await new Promise(resolve => setTimeout(resolve, 0));
+      
+      figma.notify(`Created variation ${i + 1} of ${variationCount}`, {timeout: 500});
+    } catch (error) {
+      console.error(`Error creating variation ${i + 1}:`, error);
+    }
+  }
+  
+  figma.notify(`Created ${variationCount} mosaic variations`, {timeout: 2000});
+}
+
 // Create the mosaic using brightness and color data
 async function createMosaic(
   selectedImage: SceneNode, 
@@ -345,7 +492,20 @@ async function createMosaic(
     const mostUsedName = componentLibrary.find(c => c.component.id === mostUsedComponent)?.component.name || 'Unknown';
     
     // Final notification
-    figma.notify(`Mosaic created with ${completedTiles} tiles using ${uniqueComponentsUsed} different components. Most used: "${mostUsedName}" (${maxUseCount} times)`);
+    figma.notify(`Mosaic created with ${completedTiles} tiles using ${uniqueComponentsUsed} different components.`);
+    
+    // Create variations if requested
+    if (config.variationCount > 1) {
+      await createMosaicVariations(
+        mosaicGroup, 
+        imageData, 
+        componentLibrary, 
+        config,
+        xTileCount,
+        yTileCount,
+        config.variationCount
+      );
+    }
     
   } catch (error) {
     console.error("Error creating mosaic:", error);
@@ -460,6 +620,12 @@ figma.ui.onmessage = async (msg) => {
       return;
     }
     
+    // Limit variation count based on number of components
+    const effectiveVariationCount = Math.min(config.variationCount, 10);
+    if (effectiveVariationCount !== config.variationCount) {
+      console.log(`Limiting to ${effectiveVariationCount} variations for performance`);
+    }
+    
     console.log(`Using ${rawComponentLibrary.length} component variants`);
     figma.notify(`Creating mosaic using ${rawComponentLibrary.length} component variants...`);
     
@@ -486,7 +652,12 @@ figma.ui.onmessage = async (msg) => {
       
       // Create the mosaic with the processed data
       console.log("Creating mosaic...");
-      await createMosaic(selectedImage, componentLibrary, config, imageData);
+      await createMosaic(
+        selectedImage, 
+        componentLibrary, 
+        {...config, variationCount: effectiveVariationCount}, 
+        imageData
+      );
       
     } catch (error) {
       console.error('Error creating mosaic:', error);

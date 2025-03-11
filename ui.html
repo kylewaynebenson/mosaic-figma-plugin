@@ -32,7 +32,7 @@
         }
 
         .section {
-            margin-bottom: 12px;
+            margin-bottom: 8px;
         }
 
         .section-title {
@@ -87,7 +87,7 @@
 
         .row {
             display: flex;
-            gap: 8px;
+            gap: 4px;
         }
 
         .col {
@@ -217,7 +217,14 @@
                 </div>
             </div>
         </div>
-
+        <div class="row">
+            <div class="col">
+                <div class="form-group">
+                    <label for="variation-count">Variations (slower)</label>
+                    <input type="number" id="variation-count" value="1" min="1" max="10">
+                </div>
+            </div>
+        </div>
     </div>
 
     <button id="create-mosaic">Create Mosaic</button>
@@ -607,7 +614,7 @@
             }
         };
     
-        // Update click handler to include new options
+        // Update click handler to include variation count
         document.getElementById('create-mosaic').addEventListener('click', () => {
             const config = {
                 tileSize: parseInt(document.getElementById('tile-size').value),
@@ -616,7 +623,8 @@
                 matchResolution: parseInt(document.getElementById('match-resolution').value),
                 useComponentVariants: document.getElementById('use-variants').checked,
                 imageTransparencyIsWhite: document.getElementById('image-transparency').checked,
-                componentTransparencyIsWhite: document.getElementById('component-transparency').checked
+                componentTransparencyIsWhite: document.getElementById('component-transparency').checked,
+                variationCount: parseInt(document.getElementById('variation-count').value)
             };
         
             if (!config.componentId) {
