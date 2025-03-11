@@ -140,20 +140,56 @@
             padding-top: 8px;
             display: none;
         }
+
+        #refresh-components {
+            width: auto;
+            height: auto;
+            padding: 2px 5px;
+            margin-left: 4px;
+            background: transparent;
+            color: var(--figma-color-primary);
+            font-size: 10px;
+            border: 1px solid var(--figma-color-border);
+        }
+
+        #refresh-components:hover {
+            background-color: var(--figma-color-hover);
+        }
+
+        .form-group label[for="component-name"] {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
     </style>
 </head>
 <body>
     <div class="section">
         
         <div class="form-group">
-            <label for="component-name">Component</label>
+            <label for="component-name">Component             <button id="refresh-components">
+                &#x21bb;
+            </button></label>
             <select id="component-name"></select>
+
         </div>
 
         <div class="form-group">
             <label class="checkbox-label">
                 <input type="checkbox" id="use-variants" checked>
                 Use all variants (recommended)
+            </label>
+        </div>
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" id="image-transparency">
+                Image transparency is white
+            </label>
+        </div>
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" id="component-transparency">
+                Component transparency is white
             </label>
         </div>
     </div>
@@ -176,18 +212,19 @@
             </div>
             <div class="col">
                 <div class="form-group">
-                    <label for="match-resolution">Resolution</label>
+                    <label for="match-resolution">Detail (1-10)</label>
                     <input type="number" id="match-resolution" value="5" min="1" max="10">
                 </div>
             </div>
         </div>
+
     </div>
 
     <button id="create-mosaic">Create Mosaic</button>
 
     <script>
-        // Function to calculate component brightness using Canvas API
-        async function calculateComponentBrightness(bytes) {
+        // Enhanced function to calculate image brightness and color map
+        async function calculateImageData(bytes, gridSize, transparencyIsWhite = false) {
             return new Promise((resolve, reject) => {
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d');
@@ -206,61 +243,90 @@
                         // Draw the image on the canvas
                         ctx.drawImage(img, 0, 0);
                         
-                        // Calculate brightness using image data
-                        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                        // Calculate brightness and color for each grid cell
+                        const dataMap = [];
+                        const cellWidth = img.width / gridSize.width;
+                        const cellHeight = img.height / gridSize.height;
                         
-                        // For component brightness, we specifically need to consider transparency
-                        // We need to calculate the average brightness of non-transparent pixels
-                        // This is how the real appearance/contrast of the component is determined
-                        let totalBrightness = 0;
-                        let totalPixels = 0;
-                        let transparentPixels = 0;
-                        
-                        // Process all pixels
-                        for (let i = 0; i < imageData.length; i += 4) {
-                            const r = imageData[i] / 255;
-                            const g = imageData[i + 1] / 255;
-                            const b = imageData[i + 2] / 255;
-                            const a = imageData[i + 3] / 255;
-                            
-                            // Skip fully transparent pixels
-                            if (a < 0.1) {
-                                transparentPixels++;
-                                continue;
+                        for (let y = 0; y < gridSize.height; y++) {
+                            dataMap[y] = [];
+                            for (let x = 0; x < gridSize.width; x++) {
+                                // Get image data for this grid cell
+                                const imageData = ctx.getImageData(
+                                    x * cellWidth, 
+                                    y * cellHeight, 
+                                    cellWidth, 
+                                    cellHeight
+                                ).data;
+                                
+                                // Calculate average color and brightness for this cell
+                                let totalBrightness = 0;
+                                let totalR = 0, totalG = 0, totalB = 0;
+                                let totalPixels = 0;
+                                let transparentPixels = 0;
+                                
+                                // Sample pixels (process every 4th pixel to improve performance)
+                                for (let i = 0; i < imageData.length; i += 16) {
+                                    const r = imageData[i] / 255;
+                                    const g = imageData[i + 1] / 255;
+                                    const b = imageData[i + 2] / 255;
+                                    const a = imageData[i + 3] / 255;
+                                    
+                                    // Handle transparency based on settings
+                                    if (a < 0.1) {
+                                        transparentPixels++;
+                                        
+                                        // If transparency is treated as white
+                                        if (transparencyIsWhite) {
+                                            totalR += 1.0; // White is RGB(1,1,1)
+                                            totalG += 1.0;
+                                            totalB += 1.0;
+                                            totalBrightness += 1.0;
+                                            totalPixels++;
+                                        }
+                                        
+                                        continue;
+                                    }
+                                    
+                                    // Add this pixel to the color and brightness totals
+                                    totalR += r * a;
+                                    totalG += g * a;
+                                    totalB += b * a;
+                                    
+                                    // Calculate perceived brightness (human eye sensitivity)
+                                    const brightness = (0.299 * r + 0.587 * g + 0.114 * b) * a;
+                                    totalBrightness += brightness;
+                                    totalPixels++;
+                                }
+                                
+                                // Calculate averages
+                                let avgBrightness, avgR, avgG, avgB;
+                                
+                                if (totalPixels > 0) {
+                                    avgBrightness = totalBrightness / totalPixels;
+                                    avgR = totalR / totalPixels;
+                                    avgG = totalG / totalPixels;
+                                    avgB = totalB / totalPixels;
+                                } else {
+                                    // Default for empty/fully transparent cells
+                                    avgBrightness = transparencyIsWhite ? 1.0 : 0.0;
+                                    avgR = avgG = avgB = transparencyIsWhite ? 1.0 : 0.0;
+                                }
+                                
+                                // Store brightness and color data for this cell
+                                dataMap[y][x] = {
+                                    brightness: avgBrightness,
+                                    color: { r: avgR, g: avgG, b: avgB },
+                                    transparencyRatio: transparentPixels / (imageData.length / 4)
+                                };
                             }
-                            
-                            // Calculate perceived brightness (considering alpha)
-                            // Use the formula that's more sensitive to green (human eye sensitivity)
-                            const brightness = (0.299 * r + 0.587 * g + 0.114 * b) * a;
-                            totalBrightness += brightness;
-                            totalPixels++;
                         }
-                        
-                        // Calculate average brightness (only of visible pixels)
-                        let avgBrightness;
-                        if (totalPixels > 0) {
-                            avgBrightness = totalBrightness / totalPixels;
-                        } else {
-                            // If all pixels are transparent, consider it bright (like empty space)
-                            avgBrightness = 1.0;
-                        }
-                        
-                        // For components with transparency, factor in the amount of transparency
-                        // More transparent components should be considered brighter
-                        const transparencyRatio = transparentPixels / (imageData.length / 4);
-                        
-                        // Adjust brightness: opaque dark components are darkest,
-                        // while more transparent components appear brighter
-                        const adjustedBrightness = avgBrightness + (transparencyRatio * 0.5);
-                        
-                        // Ensure the brightness is within 0-1 range
-                        const finalBrightness = Math.max(0, Math.min(1, adjustedBrightness));
                         
                         // Clean up
                         URL.revokeObjectURL(url);
                         
-                        // Return brightness
-                        resolve(finalBrightness);
+                        // Return the data map
+                        resolve(dataMap);
                     } catch (e) {
                         URL.revokeObjectURL(url);
                         reject(e);
@@ -275,9 +341,9 @@
                 img.src = url;
             });
         }
-        
-        // Function to calculate image brightness map
-        async function calculateImageBrightnessMap(bytes, gridSize) {
+
+        // Enhanced function to calculate component brightness and color
+        async function calculateComponentData(bytes, transparencyIsWhite = false) {
             return new Promise((resolve, reject) => {
                 const canvas = document.createElement('canvas');
                 const ctx = canvas.getContext('2d');
@@ -296,50 +362,75 @@
                         // Draw the image on the canvas
                         ctx.drawImage(img, 0, 0);
                         
-                        // Calculate brightness for each grid cell
-                        const brightnessMap = [];
-                        const cellWidth = img.width / gridSize.width;
-                        const cellHeight = img.height / gridSize.height;
+                        // Calculate brightness and color using image data
+                        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
                         
-                        for (let y = 0; y < gridSize.height; y++) {
-                            brightnessMap[y] = [];
-                            for (let x = 0; x < gridSize.width; x++) {
-                                // Get image data for this grid cell
-                                const imageData = ctx.getImageData(
-                                    x * cellWidth, 
-                                    y * cellHeight, 
-                                    cellWidth, 
-                                    cellHeight
-                                ).data;
+                        // Calculate color and brightness values
+                        let totalBrightness = 0;
+                        let totalR = 0, totalG = 0, totalB = 0;
+                        let totalPixels = 0;
+                        let transparentPixels = 0;
+                        
+                        // Process all pixels
+                        for (let i = 0; i < imageData.length; i += 4) {
+                            const r = imageData[i] / 255;
+                            const g = imageData[i + 1] / 255;
+                            const b = imageData[i + 2] / 255;
+                            const a = imageData[i + 3] / 255;
+                            
+                            // Handle transparency based on settings
+                            if (a < 0.1) {
+                                transparentPixels++;
                                 
-                                // Calculate average brightness for this cell
-                                let totalBrightness = 0;
-                                let totalPixels = 0;
-                                
-                                // Sample pixels (process every 4th pixel to improve performance)
-                                for (let i = 0; i < imageData.length; i += 16) {
-                                    const r = imageData[i] / 255;
-                                    const g = imageData[i + 1] / 255;
-                                    const b = imageData[i + 2] / 255;
-                                    const a = imageData[i + 3] / 255;
-                                    
-                                    // Consider alpha channel for semi-transparent images
-                                    const brightness = (0.299 * r + 0.587 * g + 0.114 * b) * a;
-                                    totalBrightness += brightness;
+                                // If transparency is treated as white
+                                if (transparencyIsWhite) {
+                                    totalR += 1.0;
+                                    totalG += 1.0;
+                                    totalB += 1.0;
+                                    totalBrightness += 1.0;
                                     totalPixels++;
                                 }
                                 
-                                // Store average brightness for this cell
-                                brightnessMap[y][x] = totalPixels > 0 ? 
-                                    totalBrightness / totalPixels : 0.5;
+                                continue;
                             }
+                            
+                            // Add this pixel's color to the totals
+                            totalR += r * a;
+                            totalG += g * a;
+                            totalB += b * a;
+                            
+                            // Calculate perceived brightness
+                            const brightness = (0.299 * r + 0.587 * g + 0.114 * b) * a;
+                            totalBrightness += brightness;
+                            totalPixels++;
                         }
+                        
+                        // Calculate averages
+                        let avgBrightness, avgR, avgG, avgB;
+                        
+                        if (totalPixels > 0) {
+                            avgBrightness = totalBrightness / totalPixels;
+                            avgR = totalR / totalPixels;
+                            avgG = totalG / totalPixels;
+                            avgB = totalB / totalPixels;
+                        } else {
+                            // Default for empty/fully transparent components
+                            avgBrightness = transparencyIsWhite ? 1.0 : 0.0;
+                            avgR = avgG = avgB = transparencyIsWhite ? 1.0 : 0.0;
+                        }
+                        
+                        // Calculate transparency ratio
+                        const transparencyRatio = transparentPixels / (imageData.length / 4);
                         
                         // Clean up
                         URL.revokeObjectURL(url);
                         
-                        // Return brightness map
-                        resolve(brightnessMap);
+                        // Return component data
+                        resolve({
+                            brightness: avgBrightness,
+                            color: { r: avgR, g: avgG, b: avgB },
+                            transparencyRatio: transparencyRatio
+                        });
                     } catch (e) {
                         URL.revokeObjectURL(url);
                         reject(e);
@@ -381,16 +472,18 @@
             // Handle process-image request
             if (message.type === 'process-image') {
                 try {
-                    const brightnessMap = await calculateImageBrightnessMap(
+                    const imageTransparencyIsWhite = message.imageTransparencyIsWhite || false;
+                    const dataMap = await calculateImageData(
                         message.bytes,
-                        message.gridSize
+                        message.gridSize,
+                        imageTransparencyIsWhite
                     );
                     
                     // Send result back to plugin
                     parent.postMessage({
                         pluginMessage: {
-                            type: 'brightness-map-result',
-                            brightnessMap
+                            type: 'image-data-result',
+                            dataMap
                         }
                     }, '*');
                 } catch (error) {
@@ -399,14 +492,18 @@
                     const defaultMap = [];
                     for (let y = 0; y < message.gridSize.height; y++) {
                         defaultMap[y] = [];
-                        for (let x = 0; x < message.gridSize.width; x++) {
-                            defaultMap[y][x] = 0.5;
+                        for (let x = 0; x < message.gridSize.width; x++) { // Fixed: x < message.gridSize.width
+                            defaultMap[y][x] = {
+                                brightness: 0.5,
+                                color: { r: 0.5, g: 0.5, b: 0.5 },
+                                transparencyRatio: 0
+                            };
                         }
                     }
                     parent.postMessage({
                         pluginMessage: {
-                            type: 'brightness-map-result',
-                            brightnessMap: defaultMap
+                            type: 'image-data-result',
+                            dataMap: defaultMap
                         }
                     }, '*');
                 }
@@ -415,24 +512,32 @@
             // Handle process-component request
             if (message.type === 'process-component') {
                 try {
-                    const brightness = await calculateComponentBrightness(message.bytes);
+                    const componentTransparencyIsWhite = message.componentTransparencyIsWhite || false;
+                    const componentData = await calculateComponentData(
+                        message.bytes,
+                        componentTransparencyIsWhite
+                    );
                     
                     // Send result back to plugin
                     parent.postMessage({
                         pluginMessage: {
-                            type: 'component-brightness-result',
+                            type: 'component-data-result',
                             componentId: message.componentId,
-                            brightness
+                            componentData
                         }
                     }, '*');
                 } catch (error) {
-                    console.error('Error calculating component brightness:', error);
-                    // Send back default brightness value
+                    console.error('Error calculating component data:', error);
+                    // Send back default values
                     parent.postMessage({
                         pluginMessage: {
-                            type: 'component-brightness-result',
+                            type: 'component-data-result',
                             componentId: message.componentId,
-                            brightness: 0.5 // Default middle brightness
+                            componentData: {
+                                brightness: 0.5,
+                                color: { r: 0.5, g: 0.5, b: 0.5 },
+                                transparencyRatio: 0
+                            }
                         }
                     }, '*');
                 }
@@ -441,7 +546,10 @@
             // Handle other message types as needed
             if (message.type === 'calculate-component-brightness') {
                 try {
-                    const brightness = await calculateComponentBrightness(message.bytes);
+                    const brightness = await calculateComponentData(
+                        message.bytes,
+                        message.transparencyIsWhite
+                    );
                     
                     // Send result back to plugin
                     parent.postMessage({
@@ -465,9 +573,10 @@
             
             if (message.type === 'calculate-image-brightness') {
                 try {
-                    const brightnessMap = await calculateImageBrightnessMap(
+                    const brightnessMap = await calculateImageData(
                         message.bytes,
-                        message.gridSize
+                        message.gridSize,
+                        message.transparencyIsWhite
                     );
                     
                     parent.postMessage({
@@ -482,7 +591,7 @@
                     const defaultMap = [];
                     for (let y = 0; y < message.gridSize.height; y++) {
                         defaultMap[y] = [];
-                        for (let x = 0; y < message.gridSize.width; x++) {
+                        for (let x = 0; x < message.gridSize.width; x++) { // Fixed: x < message.gridSize.width
                             defaultMap[y][x] = 0.5;
                         }
                     }
@@ -498,20 +607,23 @@
             }
         };
     
+        // Update click handler to include new options
         document.getElementById('create-mosaic').addEventListener('click', () => {
             const config = {
                 tileSize: parseInt(document.getElementById('tile-size').value),
                 componentId: document.getElementById('component-name').value,
                 enlargement: parseInt(document.getElementById('enlargement').value),
                 matchResolution: parseInt(document.getElementById('match-resolution').value),
-                useComponentVariants: document.getElementById('use-variants').checked
+                useComponentVariants: document.getElementById('use-variants').checked,
+                imageTransparencyIsWhite: document.getElementById('image-transparency').checked,
+                componentTransparencyIsWhite: document.getElementById('component-transparency').checked
             };
-    
+        
             if (!config.componentId) {
                 alert('Please select a component');
                 return;
             }
-    
+        
             parent.postMessage({ 
                 pluginMessage: { 
                     type: 'create-mosaic', 
@@ -526,6 +638,20 @@
                 type: 'get-current-page-components' 
             } 
         }, '*');
+
+        // Add event listener for the refresh button
+        document.getElementById('refresh-components').addEventListener('click', () => {
+            // Notify the user that we're refreshing
+            const componentSelect = document.getElementById('component-name');
+            componentSelect.innerHTML = '<option value="">Loading components...</option>';
+            
+            // Request updated components from current page
+            parent.postMessage({ 
+                pluginMessage: { 
+                    type: 'get-current-page-components' 
+                } 
+            }, '*');
+        });
     </script>
 </body>
 </html>

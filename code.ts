@@ -1,11 +1,28 @@
 // Mosaic Plugin for Figma - Improved implementation with Canvas API brightness calculation
 
+// Updated interface to include transparency options and color matching
 interface MosaicConfig {
   tileSize: number;
   componentId?: string;
   enlargement: number;
   matchResolution: number;
   useComponentVariants: boolean;
+  imageTransparencyIsWhite: boolean;
+  componentTransparencyIsWhite: boolean;
+}
+
+// Updated data structures for cell and component data
+interface CellData {
+  brightness: number;
+  color: { r: number, g: number, b: number };
+  transparencyRatio: number;
+}
+
+interface ComponentData {
+  component: ComponentNode;
+  brightness: number;
+  color: { r: number, g: number, b: number };
+  transparencyRatio: number;
 }
 
 // Main plugin code
@@ -16,12 +33,12 @@ function hasFills(node: SceneNode): node is SceneNode & { fills: ReadonlyArray<P
   return 'fills' in node && Array.isArray(node.fills);
 }
 
-// Create a brightness map from the selected image
-async function getBrightnessMap(
+// Function to get image data
+async function getImageData(
   node: SceneNode,
   gridSize: { width: number, height: number },
-  resolution: number
-): Promise<number[][]> {
+  config: MosaicConfig
+): Promise<CellData[][]> {
   // Export the image as PNG
   let bytes: Uint8Array;
   try {
@@ -31,26 +48,34 @@ async function getBrightnessMap(
     });
   } catch (error) {
     console.error('Failed to export image:', error);
-    // Create a fallback brightness map with default values
-    const result: number[][] = [];
+    // Create a fallback data map with default values
+    const result: CellData[][] = [];
     for (let y = 0; y < gridSize.height; y++) {
       result[y] = [];
       for (let x = 0; x < gridSize.width; x++) {
         const relativeX = x / gridSize.width;
         const relativeY = y / gridSize.height;
         // Create a simple gradient fallback
-        result[y][x] = 0.3 + relativeX * 0.4 + relativeY * 0.3;
+        result[y][x] = {
+          brightness: 0.3 + relativeX * 0.4 + relativeY * 0.3,
+          color: { 
+            r: 0.3 + relativeX * 0.7, 
+            g: 0.3 + relativeY * 0.7, 
+            b: 0.5 
+          },
+          transparencyRatio: 0
+        };
       }
     }
     return result;
   }
   
-  // Process the image data in UI context where Canvas API is available
+  // Process the image data in UI context
   figma.ui.postMessage({
     type: 'process-image',
     bytes,
     gridSize,
-    resolution
+    imageTransparencyIsWhite: config.imageTransparencyIsWhite
   });
   
   console.log("Sent image to UI for processing");
@@ -58,10 +83,10 @@ async function getBrightnessMap(
   // Return a Promise that will resolve when UI sends back the result
   return new Promise((resolve) => {
     const handler = (msg: any) => {
-      if (msg.type === 'brightness-map-result' && msg.brightnessMap) {
-        console.log("Received brightness map from UI");
+      if (msg.type === 'image-data-result' && msg.dataMap) {
+        console.log("Received image data from UI");
         figma.ui.off('message', handler);
-        resolve(msg.brightnessMap);
+        resolve(msg.dataMap);
       }
     };
     
@@ -69,44 +94,53 @@ async function getBrightnessMap(
     
     // Add timeout for fallback
     setTimeout(() => {
-      console.log("Timeout waiting for brightness map");
+      console.log("Timeout waiting for image data");
       figma.ui.off('message', handler);
       
-      // Create a fallback brightness map
-      const result: number[][] = [];
+      // Create a fallback data map
+      const result: CellData[][] = [];
       for (let y = 0; y < gridSize.height; y++) {
         result[y] = [];
         for (let x = 0; x < gridSize.width; x++) {
           const relativeX = x / gridSize.width;
           const relativeY = y / gridSize.height;
-          result[y][x] = 0.3 + relativeX * 0.4 + relativeY * 0.3;
+          result[y][x] = {
+            brightness: 0.3 + relativeX * 0.4 + relativeY * 0.3,
+            color: { 
+              r: 0.3 + relativeX * 0.7, 
+              g: 0.3 + relativeY * 0.7, 
+              b: 0.5 
+            },
+            transparencyRatio: 0
+          };
         }
       }
       resolve(result);
-    }, 10000); // 10 second timeout
+    }, 10000);
   });
 }
 
-// Get brightness values for all components by processing them as images
-async function getComponentBrightnesses(
-  components: ComponentNode[]
-): Promise<Array<{component: ComponentNode, brightness: number}>> {
+// Function to get component data
+async function getComponentData(
+  components: ComponentNode[], 
+  config: MosaicConfig
+): Promise<ComponentData[]> {
   figma.notify(`Analyzing ${components.length} components...`, { timeout: 1000 });
   
   // Create array to hold component data
-  const componentData: Array<{component: ComponentNode, brightness: number}> = [];
+  const componentData: ComponentData[] = [];
   const pendingResults = new Map<string, {
     component: ComponentNode,
-    resolve: (brightness: number) => void
+    resolve: (data: any) => void
   }>();
   
   // Set up message handler
   const messageHandler = (msg: any) => {
-    if (msg.type === 'component-brightness-result' && msg.componentId) {
+    if (msg.type === 'component-data-result' && msg.componentId) {
       const pending = pendingResults.get(msg.componentId);
       if (pending) {
-        console.log(`Received brightness for ${msg.componentId}: ${msg.brightness}`);
-        pending.resolve(msg.brightness);
+        console.log(`Received data for ${msg.componentId}`);
+        pending.resolve(msg.componentData);
         pendingResults.delete(msg.componentId);
       }
     }
@@ -123,14 +157,15 @@ async function getComponentBrightnesses(
         constraint: { type: 'SCALE', value: 1 }
       });
       
-      // Calculate brightness using UI
-      const brightness = await new Promise<number>((resolve) => {
+      // Calculate component data using UI
+      const data = await new Promise<any>((resolve) => {
         pendingResults.set(component.id, { component, resolve });
         
         figma.ui.postMessage({
           type: 'process-component',
           componentId: component.id,
-          bytes
+          bytes,
+          componentTransparencyIsWhite: config.componentTransparencyIsWhite
         });
         
         // Add timeout for this component
@@ -138,15 +173,24 @@ async function getComponentBrightnesses(
           if (pendingResults.has(component.id)) {
             console.log(`Timeout for component ${component.id}`);
             pendingResults.delete(component.id);
-            resolve(0.5); // Default brightness
+            resolve({
+              brightness: 0.5,
+              color: { r: 0.5, g: 0.5, b: 0.5 },
+              transparencyRatio: 0
+            });
           }
-        }, 5000); // 5 second timeout per component
+        }, 5000);
       });
       
-      return { component, brightness };
+      return { component, ...data };
     } catch (error) {
       console.error(`Error processing component ${component.name}:`, error);
-      return { component, brightness: 0.5 }; // Default brightness on error
+      return { 
+        component, 
+        brightness: 0.5,
+        color: { r: 0.5, g: 0.5, b: 0.5 },
+        transparencyRatio: 0
+      };
     }
   });
   
@@ -159,23 +203,15 @@ async function getComponentBrightnesses(
   return results;
 }
 
-// Create the mosaic using brightness data and components
+// Create the mosaic using brightness and color data
 async function createMosaic(
   selectedImage: SceneNode, 
-  componentLibrary: Array<{component: ComponentNode, brightness: number}>, 
+  componentLibrary: ComponentData[], 
   config: MosaicConfig, 
-  brightnessMap: number[][]
+  imageData: CellData[][]
 ) {
   try {
-    // Sort components by brightness
-    componentLibrary.sort((a, b) => a.brightness - b.brightness);
-    console.log("Components sorted by brightness:", 
-      componentLibrary.map(c => `${c.component.name}: ${c.brightness.toFixed(2)}`).join(', '));
-    
-    // Get min and max brightness from components
-    const minBrightness = componentLibrary[0]?.brightness || 0;
-    const maxBrightness = componentLibrary[componentLibrary.length - 1]?.brightness || 1;
-    console.log(`Component brightness range: ${minBrightness.toFixed(2)} to ${maxBrightness.toFixed(2)}`);
+    console.log(`Creating mosaic with ${componentLibrary.length} components`);
     
     // Create a frame to hold the mosaic
     const mosaicGroup = figma.createFrame();
@@ -192,6 +228,7 @@ async function createMosaic(
     
     // Add to current page first so any errors are visible
     figma.currentPage.appendChild(mosaicGroup);
+    console.log("Created mosaic frame");
     
     // Calculate tile count
     const xTileCount = Math.floor(width / config.tileSize);
@@ -215,6 +252,14 @@ async function createMosaic(
     // Map of how many times each component has been used
     const componentUsage = new Map<string, number>();
     
+    // Verify data dimensions
+    if (imageData.length === 0 || imageData[0].length === 0) {
+      console.error("Image data is empty!");
+      figma.notify("Error: Image data is invalid");
+      mosaicGroup.remove();
+      return;
+    }
+    
     for (let y = 0; y < yTileCount; y++) {
       for (let batchStartX = 0; batchStartX < xTileCount; batchStartX += BATCH_SIZE) {
         const batchEndX = Math.min(batchStartX + BATCH_SIZE, xTileCount);
@@ -222,27 +267,40 @@ async function createMosaic(
         // Process this batch
         for (let x = batchStartX; x < batchEndX; x++) {
           try {
-            // Get brightness for this position
-            // Map x,y coordinates to brightness map indices
-            const mapX = Math.min(brightnessMap[0].length - 1, Math.floor(x * brightnessMap[0].length / xTileCount));
-            const mapY = Math.min(brightnessMap.length - 1, Math.floor(y * brightnessMap.length / yTileCount));
-            const brightness = brightnessMap[mapY][mapX];
+            // Get data for this position
+            // Map x,y coordinates to data map indices
+            const mapX = Math.min(imageData[0].length - 1, Math.floor(x * imageData[0].length / xTileCount));
+            const mapY = Math.min(imageData.length - 1, Math.floor(y * imageData.length / yTileCount));
+            const cellData = imageData[mapY][mapX];
             
-            // For each position, find the component with the closest brightness
+            // Calculate similarity score for each component
+            // This combines brightness and color matching
             let bestMatch = componentLibrary[0].component;
-            let bestDifference = Math.abs(brightness - componentLibrary[0].brightness);
+            let bestScore = Number.MAX_VALUE;
             
-            // Simple linear search to find best match
-            for (const { component, brightness: compBrightness } of componentLibrary) {
-              const difference = Math.abs(brightness - compBrightness);
+            // Score each component
+            for (const compData of componentLibrary) {
+              // Calculate brightness difference (weighted at 60%)
+              const brightnessDiff = Math.abs(cellData.brightness - compData.brightness);
+              
+              // Calculate color difference (weighted at 40%)
+              // Using color distance formula
+              const colorDiff = Math.sqrt(
+                Math.pow(cellData.color.r - compData.color.r, 2) +
+                Math.pow(cellData.color.g - compData.color.g, 2) +
+                Math.pow(cellData.color.b - compData.color.b, 2)
+              ) / Math.sqrt(3); // Normalized to 0-1
+              
+              // Combined score (lower is better)
+              const score = brightnessDiff * 0.6 + colorDiff * 0.4;
               
               // Apply a small penalty for overused components
-              const usageCount = componentUsage.get(component.id) || 0;
+              const usageCount = componentUsage.get(compData.component.id) || 0;
               const usagePenalty = Math.min(usageCount * 0.01, 0.1); // Cap the penalty
               
-              if (difference + usagePenalty < bestDifference) {
-                bestDifference = difference;
-                bestMatch = component;
+              if (score + usagePenalty < bestScore) {
+                bestScore = score + usagePenalty;
+                bestMatch = compData.component;
               }
             }
             
@@ -414,21 +472,21 @@ figma.ui.onmessage = async (msg) => {
       // Show processing message
       figma.notify("Analyzing image...");
       
-      // Get brightness map from the image using UI context processing
-      console.log("Getting brightness map...");
-      const brightnessMap = await getBrightnessMap(
+      // Get image data using UI context processing
+      console.log("Getting image data...");
+      const imageData = await getImageData(
         selectedImage,
         { width: gridWidth, height: gridHeight },
-        config.matchResolution
+        config
       );
       
-      // Process components to get brightness values
-      console.log("Getting component brightnesses...");
-      const componentLibrary = await getComponentBrightnesses(rawComponentLibrary);
+      // Process components to get brightness and color values
+      console.log("Getting component data...");
+      const componentLibrary = await getComponentData(rawComponentLibrary, config);
       
       // Create the mosaic with the processed data
       console.log("Creating mosaic...");
-      await createMosaic(selectedImage, componentLibrary, config, brightnessMap);
+      await createMosaic(selectedImage, componentLibrary, config, imageData);
       
     } catch (error) {
       console.error('Error creating mosaic:', error);
@@ -437,13 +495,13 @@ figma.ui.onmessage = async (msg) => {
   }
   
   // These handlers are not needed since we're using promises with closures
-  else if (msg.type === 'brightness-map-result') {
-    console.log('Received brightness map from UI (main handler)');
-    // This will be handled by the Promise in getBrightnessMap
+  else if (msg.type === 'image-data-result') {
+    console.log('Received image data from UI (main handler)');
+    // This will be handled by the Promise in getImageData
   }
   
-  else if (msg.type === 'component-brightness-result') {
-    console.log(`Received brightness for component ${msg.componentId}: ${msg.brightness} (main handler)`);
-    // This will be handled by the Promise in getComponentBrightnesses
+  else if (msg.type === 'component-data-result') {
+    console.log(`Received data for component ${msg.componentId} (main handler)`);
+    // This will be handled by the Promise in getComponentData
   }
 };
