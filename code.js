@@ -14,9 +14,13 @@ figma.showUI(__html__, { width: 240, height: 350 });
 function hasFills(node) {
     return 'fills' in node && Array.isArray(node.fills);
 }
-// Function to get image data
-function getImageData(node, gridSize, config) {
+// Update the getImageData function to use columnCount
+function getImageData(node, config) {
     return __awaiter(this, void 0, void 0, function* () {
+        // Calculate grid size based on columnCount
+        const aspectRatio = node.height / node.width;
+        const gridWidth = config.columnCount;
+        const gridHeight = Math.round(gridWidth * aspectRatio);
         // Export the image as PNG
         let bytes;
         try {
@@ -29,11 +33,11 @@ function getImageData(node, gridSize, config) {
             console.error('Failed to export image:', error);
             // Create a fallback data map with default values
             const result = [];
-            for (let y = 0; y < gridSize.height; y++) {
+            for (let y = 0; y < gridHeight; y++) {
                 result[y] = [];
-                for (let x = 0; x < gridSize.width; x++) {
-                    const relativeX = x / gridSize.width;
-                    const relativeY = y / gridSize.height;
+                for (let x = 0; x < gridWidth; x++) {
+                    const relativeX = x / gridWidth;
+                    const relativeY = y / gridHeight;
                     // Create a simple gradient fallback
                     result[y][x] = {
                         brightness: 0.3 + relativeX * 0.4 + relativeY * 0.3,
@@ -52,10 +56,10 @@ function getImageData(node, gridSize, config) {
         figma.ui.postMessage({
             type: 'process-image',
             bytes,
-            gridSize,
+            gridSize: { width: gridWidth, height: gridHeight },
             imageTransparencyIsWhite: config.imageTransparencyIsWhite
         });
-        console.log("Sent image to UI for processing");
+        console.log(`Sent image to UI for processing with grid size ${gridWidth}x${gridHeight}`);
         // Return a Promise that will resolve when UI sends back the result
         return new Promise((resolve) => {
             const handler = (msg) => {
@@ -72,11 +76,11 @@ function getImageData(node, gridSize, config) {
                 figma.ui.off('message', handler);
                 // Create a fallback data map
                 const result = [];
-                for (let y = 0; y < gridSize.height; y++) {
+                for (let y = 0; y < gridHeight; y++) {
                     result[y] = [];
-                    for (let x = 0; x < gridSize.width; x++) {
-                        const relativeX = x / gridSize.width;
-                        const relativeY = y / gridSize.height;
+                    for (let x = 0; x < gridWidth; x++) {
+                        const relativeX = x / gridWidth;
+                        const relativeY = y / gridHeight;
                         result[y][x] = {
                             brightness: 0.3 + relativeX * 0.4 + relativeY * 0.3,
                             color: {
@@ -188,11 +192,13 @@ function createMosaicVariations(baseFrame, imageData, componentLibrary, config, 
         baseFrame.remove(); // Remove the original standalone mosaic
         // Keep track of existing instance placements
         const instanceMap = new Map();
-        // Build a map of the original mosaic components
+        // Ensure tileSizeBase is defined
+        const tileSizeBase = config.tileSizeBase || (baseFrame.width / xTileCount);
+        // Replace instances of config.tileSizeBase with tileSizeBase
         originalMosaic.children.forEach((child, index) => {
             if (child.type === 'INSTANCE') {
-                const x = Math.floor(child.x / config.tileSize);
-                const y = Math.floor(child.y / config.tileSize);
+                const x = Math.floor(child.x / tileSizeBase);
+                const y = Math.floor(child.y / tileSizeBase);
                 instanceMap.set(`${x},${y}`, child.mainComponent);
             }
         });
@@ -224,8 +230,8 @@ function createMosaicVariations(baseFrame, imageData, componentLibrary, config, 
                     // Find the instance at this position
                     const instance = newMosaic.children.find(child => {
                         return child.type === 'INSTANCE' &&
-                            Math.floor(child.x / config.tileSize) === x &&
-                            Math.floor(child.y / config.tileSize) === y;
+                            Math.floor(child.x / tileSizeBase) === x &&
+                            Math.floor(child.y / tileSizeBase) === y;
                     });
                     if (!instance)
                         return; // Skip if not found
@@ -260,7 +266,7 @@ function createMosaicVariations(baseFrame, imageData, componentLibrary, config, 
                         const newInstance = selectedComponent.createInstance();
                         newInstance.x = instance.x;
                         newInstance.y = instance.y;
-                        newInstance.resize(config.tileSize, config.tileSize);
+                        newInstance.resize(tileSizeBase, tileSizeBase);
                         // Add new instance and remove old one
                         newMosaic.appendChild(newInstance);
                         instance.remove();
@@ -277,7 +283,144 @@ function createMosaicVariations(baseFrame, imageData, componentLibrary, config, 
         figma.notify(`Created ${variationCount} mosaic variations`, { timeout: 2000 });
     });
 }
-// Create the mosaic using brightness and color data
+// Helper function to determine appropriate component size for a region
+function determineTileSize(imageData, startX, startY, xTileCount, yTileCount, maxTileSize) {
+    // Default to 1x1
+    let size = 1;
+    // If we don't allow larger tiles, return 1x1
+    if (maxTileSize <= 1) {
+        const cell = imageData[startY][startX];
+        return {
+            size: 1,
+            averageBrightness: cell.brightness,
+            averageColor: cell.color
+        };
+    }
+    // Check if we can create a 2x2 tile
+    if (maxTileSize >= 2 &&
+        startX + 1 < xTileCount &&
+        startY + 1 < yTileCount) {
+        // Get the 4 cells that would form a 2x2 tile
+        const topLeft = imageData[startY][startX];
+        const topRight = imageData[startY][startX + 1];
+        const bottomLeft = imageData[startY + 1][startX];
+        const bottomRight = imageData[startY + 1][startX + 1];
+        // Calculate the brightness variance
+        const brightnesses = [
+            topLeft.brightness,
+            topRight.brightness,
+            bottomLeft.brightness,
+            bottomRight.brightness
+        ];
+        const avgBrightness = brightnesses.reduce((sum, b) => sum + b, 0) / 4;
+        // Calculate max deviation from average brightness
+        const maxBrightnessDev = Math.max(...brightnesses.map(b => Math.abs(b - avgBrightness)));
+        // Calculate color variance
+        const avgColor = {
+            r: (topLeft.color.r + topRight.color.r + bottomLeft.color.r + bottomRight.color.r) / 4,
+            g: (topLeft.color.g + topRight.color.g + bottomLeft.color.g + bottomRight.color.g) / 4,
+            b: (topLeft.color.b + topRight.color.b + bottomLeft.color.b + bottomRight.color.b) / 4
+        };
+        const colorDevs = [
+            Math.sqrt(Math.pow(topLeft.color.r - avgColor.r, 2) +
+                Math.pow(topLeft.color.g - avgColor.g, 2) +
+                Math.pow(topLeft.color.b - avgColor.b, 2)),
+            Math.sqrt(Math.pow(topRight.color.r - avgColor.r, 2) +
+                Math.pow(topRight.color.g - avgColor.g, 2) +
+                Math.pow(topRight.color.b - avgColor.b, 2)),
+            Math.sqrt(Math.pow(bottomLeft.color.r - avgColor.r, 2) +
+                Math.pow(bottomLeft.color.g - avgColor.g, 2) +
+                Math.pow(bottomLeft.color.b - avgColor.b, 2)),
+            Math.sqrt(Math.pow(bottomRight.color.r - avgColor.r, 2) +
+                Math.pow(bottomRight.color.g - avgColor.g, 2) +
+                Math.pow(bottomRight.color.b - avgColor.b, 2))
+        ];
+        const maxColorDev = Math.max(...colorDevs);
+        // If the region is similar enough, use a 2x2 tile
+        const BRIGHTNESS_THRESHOLD = 0.1; // Max allowed brightness difference
+        const COLOR_THRESHOLD = 0.15; // Max allowed color difference
+        if (maxBrightnessDev < BRIGHTNESS_THRESHOLD && maxColorDev < COLOR_THRESHOLD) {
+            size = 2;
+            // Check if we can create a 4x4 tile
+            if (maxTileSize >= 4 &&
+                startX + 3 < xTileCount &&
+                startY + 3 < yTileCount) {
+                // Check if the 4x4 region is consistent
+                let consistent = true;
+                let totalBrightness = 0;
+                let totalR = 0, totalG = 0, totalB = 0;
+                let count = 0;
+                for (let y = startY; y < startY + 4; y++) {
+                    for (let x = startX; x < startX + 4; x++) {
+                        if (y >= imageData.length || x >= imageData[0].length) {
+                            consistent = false;
+                            break;
+                        }
+                        const cell = imageData[y][x];
+                        totalBrightness += cell.brightness;
+                        totalR += cell.color.r;
+                        totalG += cell.color.g;
+                        totalB += cell.color.b;
+                        count++;
+                    }
+                    if (!consistent)
+                        break;
+                }
+                if (consistent) {
+                    const avg4x4Brightness = totalBrightness / count;
+                    const avg4x4Color = {
+                        r: totalR / count,
+                        g: totalG / count,
+                        b: totalB / count
+                    };
+                    // Check all cells for consistency with the 4x4 average
+                    let isConsistent4x4 = true;
+                    for (let y = startY; y < startY + 4 && isConsistent4x4; y++) {
+                        for (let x = startX; x < startX + 4 && isConsistent4x4; x++) {
+                            const cell = imageData[y][x];
+                            const brightnessDiff = Math.abs(cell.brightness - avg4x4Brightness);
+                            const colorDiff = Math.sqrt(Math.pow(cell.color.r - avg4x4Color.r, 2) +
+                                Math.pow(cell.color.g - avg4x4Color.g, 2) +
+                                Math.pow(cell.color.b - avg4x4Color.b, 2));
+                            if (brightnessDiff > BRIGHTNESS_THRESHOLD || colorDiff > COLOR_THRESHOLD) {
+                                isConsistent4x4 = false;
+                            }
+                        }
+                    }
+                    if (isConsistent4x4) {
+                        size = 4;
+                        return {
+                            size: 4,
+                            averageBrightness: avg4x4Brightness,
+                            averageColor: avg4x4Color
+                        };
+                    }
+                }
+            }
+            return {
+                size: 2,
+                averageBrightness: avgBrightness,
+                averageColor: avgColor
+            };
+        }
+    }
+    // Return 1x1 if we can't use a larger size
+    const cell = imageData[startY][startX];
+    return {
+        size: 1,
+        averageBrightness: cell.brightness,
+        averageColor: cell.color
+    };
+}
+// Determine max tile size from config
+function getMaxTileSize(tileSizeVariation) {
+    switch (tileSizeVariation) {
+        case '4x': return 4;
+        case '2x': return 2;
+        default: return 1;
+    }
+}
+// Update the createMosaic function to prevent overlapping tiles
 function createMosaic(selectedImage, componentLibrary, config, imageData) {
     var _a;
     return __awaiter(this, void 0, void 0, function* () {
@@ -286,7 +429,7 @@ function createMosaic(selectedImage, componentLibrary, config, imageData) {
             // Create a frame to hold the mosaic
             const mosaicGroup = figma.createFrame();
             mosaicGroup.name = 'Mosaic';
-            // Calculate dimensions
+            // Calculate dimensions based on column count instead of tile size
             const width = selectedImage.width * config.enlargement;
             const height = selectedImage.height * config.enlargement;
             mosaicGroup.resize(width, height);
@@ -296,20 +439,26 @@ function createMosaic(selectedImage, componentLibrary, config, imageData) {
             // Add to current page first so any errors are visible
             figma.currentPage.appendChild(mosaicGroup);
             console.log("Created mosaic frame");
-            // Calculate tile count
-            const xTileCount = Math.floor(width / config.tileSize);
-            const yTileCount = Math.floor(height / config.tileSize);
+            // Calculate grid based on requested column count
+            const xTileCount = config.columnCount;
+            const aspectRatio = selectedImage.height / selectedImage.width;
+            const yTileCount = Math.round(xTileCount * aspectRatio);
             if (xTileCount <= 0 || yTileCount <= 0) {
-                figma.notify(`Unable to create mosaic: tile count would be ${xTileCount}x${yTileCount}`);
+                figma.notify(`Unable to create mosaic: invalid column count: ${xTileCount}`);
                 mosaicGroup.remove();
                 return;
             }
-            console.log(`Creating ${xTileCount}x${yTileCount} mosaic grid`);
+            // Calculate the tile size based on the desired column count
+            const tileBaseSize = width / xTileCount;
+            // Add tileBaseSize to config for reference in variations
+            config.tileSizeBase = tileBaseSize;
+            console.log(`Creating ${xTileCount}x${yTileCount} mosaic grid with size variation: ${config.tileSizeVariation}`);
+            console.log(`Base tile size: ${tileBaseSize}px`);
+            // Get maximum tile size from config
+            const maxTileSize = getMaxTileSize(config.tileSizeVariation);
             // Count tiles for progress
             let completedTiles = 0;
             const totalTiles = xTileCount * yTileCount;
-            // Process in batches to prevent UI freezing
-            const BATCH_SIZE = 20;
             // Map of how many times each component has been used
             const componentUsage = new Map();
             // Verify data dimensions
@@ -319,61 +468,115 @@ function createMosaic(selectedImage, componentLibrary, config, imageData) {
                 mosaicGroup.remove();
                 return;
             }
+            // Create a grid to track which cells are already filled
+            // This will be our primary source of truth for occupied cells
+            const occupiedGrid = [];
             for (let y = 0; y < yTileCount; y++) {
-                for (let batchStartX = 0; batchStartX < xTileCount; batchStartX += BATCH_SIZE) {
-                    const batchEndX = Math.min(batchStartX + BATCH_SIZE, xTileCount);
-                    // Process this batch
-                    for (let x = batchStartX; x < batchEndX; x++) {
-                        try {
-                            // Get data for this position
-                            // Map x,y coordinates to data map indices
-                            const mapX = Math.min(imageData[0].length - 1, Math.floor(x * imageData[0].length / xTileCount));
-                            const mapY = Math.min(imageData.length - 1, Math.floor(y * imageData.length / yTileCount));
-                            const cellData = imageData[mapY][mapX];
-                            // Calculate similarity score for each component
-                            // This combines brightness and color matching
-                            let bestMatch = componentLibrary[0].component;
-                            let bestScore = Number.MAX_VALUE;
-                            // Score each component
-                            for (const compData of componentLibrary) {
-                                // Calculate brightness difference (weighted at 60%)
-                                const brightnessDiff = Math.abs(cellData.brightness - compData.brightness);
-                                // Calculate color difference (weighted at 40%)
-                                // Using color distance formula
-                                const colorDiff = Math.sqrt(Math.pow(cellData.color.r - compData.color.r, 2) +
-                                    Math.pow(cellData.color.g - compData.color.g, 2) +
-                                    Math.pow(cellData.color.b - compData.color.b, 2)) / Math.sqrt(3); // Normalized to 0-1
-                                // Combined score (lower is better)
-                                const score = brightnessDiff * 0.6 + colorDiff * 0.4;
-                                // Apply a small penalty for overused components
-                                const usageCount = componentUsage.get(compData.component.id) || 0;
-                                const usagePenalty = Math.min(usageCount * 0.01, 0.1); // Cap the penalty
-                                if (score + usagePenalty < bestScore) {
-                                    bestScore = score + usagePenalty;
-                                    bestMatch = compData.component;
+                occupiedGrid[y] = [];
+                for (let x = 0; x < xTileCount; x++) {
+                    occupiedGrid[y][x] = false;
+                }
+            }
+            // Process grid cells with potential for larger tiles
+            for (let y = 0; y < yTileCount; y++) {
+                // Let the UI update between rows
+                if (y > 0 && y % 10 === 0) {
+                    yield new Promise(resolve => setTimeout(resolve, 0));
+                }
+                for (let x = 0; x < xTileCount; x++) {
+                    // Skip if this cell is already occupied
+                    if (occupiedGrid[y][x])
+                        continue;
+                    try {
+                        // Map x,y coordinates to data map indices
+                        const mapX = Math.min(imageData[0].length - 1, Math.floor(x * imageData[0].length / xTileCount));
+                        const mapY = Math.min(imageData.length - 1, Math.floor(y * imageData.length / yTileCount));
+                        // Check if we can fit larger tiles 
+                        // (don't even try if surrounding cells are occupied)
+                        let availableSize = 1;
+                        if (maxTileSize >= 2) {
+                            // Check if a 2x2 area is available
+                            if (x + 1 < xTileCount && y + 1 < yTileCount &&
+                                !occupiedGrid[y][x + 1] && !occupiedGrid[y + 1][x] && !occupiedGrid[y + 1][x + 1]) {
+                                availableSize = 2;
+                                // Check if a 4x4 area is available
+                                if (maxTileSize >= 4 && x + 3 < xTileCount && y + 3 < yTileCount) {
+                                    let area4x4Available = true;
+                                    // Check if the entire 4x4 area is available
+                                    for (let dy = 0; dy < 4 && area4x4Available; dy++) {
+                                        for (let dx = 0; dx < 4 && area4x4Available; dx++) {
+                                            if (y + dy >= yTileCount || x + dx >= xTileCount || occupiedGrid[y + dy][x + dx]) {
+                                                area4x4Available = false;
+                                            }
+                                        }
+                                    }
+                                    if (area4x4Available) {
+                                        availableSize = 4;
+                                    }
                                 }
                             }
-                            // Create component instance
-                            const instance = bestMatch.createInstance();
-                            instance.x = x * config.tileSize;
-                            instance.y = y * config.tileSize;
-                            instance.resize(config.tileSize, config.tileSize);
-                            mosaicGroup.appendChild(instance);
-                            // Update component usage
-                            const currentUsage = componentUsage.get(bestMatch.id) || 0;
-                            componentUsage.set(bestMatch.id, currentUsage + 1);
-                            // Update progress
-                            completedTiles++;
-                            if (completedTiles % 50 === 0 || completedTiles === totalTiles) {
-                                figma.notify(`Creating mosaic: ${Math.round((completedTiles / totalTiles) * 100)}%`, { timeout: 500 });
+                        }
+                        // Now, determine if the available area is visually consistent
+                        const { size, averageBrightness, averageColor } = determineTileSizeByContent(imageData, // This is already CellData[][], so it matches now
+                        mapX, mapY, Math.min(imageData[0].length, xTileCount), Math.min(imageData.length, yTileCount), availableSize // Limit by what's physically available in the grid
+                        );
+                        // Mark all covered cells as occupied
+                        for (let dy = 0; dy < size; dy++) {
+                            for (let dx = 0; dx < size; dx++) {
+                                if (y + dy < yTileCount && x + dx < xTileCount) {
+                                    occupiedGrid[y + dy][x + dx] = true;
+                                }
                             }
                         }
-                        catch (error) {
-                            console.error(`Error processing tile at (${x}, ${y}):`, error);
+                        // Create a cell data object with the average values
+                        const cellData = {
+                            brightness: averageBrightness,
+                            color: averageColor,
+                            transparencyRatio: 0 // Not needed for matching
+                        };
+                        // Find the best matching component
+                        let bestMatch = componentLibrary[0].component;
+                        let bestScore = Number.MAX_VALUE;
+                        // Score each component
+                        for (const compData of componentLibrary) {
+                            // Calculate brightness difference (weighted at 60%)
+                            const brightnessDiff = Math.abs(cellData.brightness - compData.brightness);
+                            // Calculate color difference (weighted at 40%)
+                            // Using color distance formula
+                            const colorDiff = Math.sqrt(Math.pow(cellData.color.r - compData.color.r, 2) +
+                                Math.pow(cellData.color.g - compData.color.g, 2) +
+                                Math.pow(cellData.color.b - compData.color.b, 2)) / Math.sqrt(3); // Normalized to 0-1
+                            // Combined score (lower is better)
+                            const score = brightnessDiff * 0.6 + colorDiff * 0.4;
+                            // Apply a small penalty for overused components
+                            const usageCount = componentUsage.get(compData.component.id) || 0;
+                            const usagePenalty = Math.min(usageCount * 0.01, 0.1); // Cap the penalty
+                            if (score + usagePenalty < bestScore) {
+                                bestScore = score + usagePenalty;
+                                bestMatch = compData.component;
+                            }
+                        }
+                        // Create component instance
+                        const instance = bestMatch.createInstance();
+                        instance.x = x * tileBaseSize;
+                        instance.y = y * tileBaseSize;
+                        // Resize instance based on the tile size we determined
+                        const tileWidth = size * tileBaseSize;
+                        const tileHeight = size * tileBaseSize;
+                        instance.resize(tileWidth, tileHeight);
+                        mosaicGroup.appendChild(instance);
+                        // Update component usage
+                        const currentUsage = componentUsage.get(bestMatch.id) || 0;
+                        componentUsage.set(bestMatch.id, currentUsage + 1);
+                        // Update progress (count by area covered)
+                        completedTiles += size * size;
+                        if (completedTiles % 50 === 0 || completedTiles >= totalTiles) {
+                            figma.notify(`Creating mosaic: ${Math.min(100, Math.round((completedTiles / totalTiles) * 100))}%`, { timeout: 500 });
                         }
                     }
-                    // Let the UI update between batches
-                    yield new Promise(resolve => setTimeout(resolve, 0));
+                    catch (error) {
+                        console.error(`Error processing tile at (${x}, ${y}):`, error);
+                    }
                 }
             }
             // Calculate statistics about component usage
@@ -388,7 +591,7 @@ function createMosaic(selectedImage, componentLibrary, config, imageData) {
             });
             const mostUsedName = ((_a = componentLibrary.find(c => c.component.id === mostUsedComponent)) === null || _a === void 0 ? void 0 : _a.component.name) || 'Unknown';
             // Final notification
-            figma.notify(`Mosaic created with ${completedTiles} tiles using ${uniqueComponentsUsed} different components.`);
+            figma.notify(`Mosaic created using ${uniqueComponentsUsed} different components.`);
             // Create variations if requested
             if (config.variationCount > 1) {
                 yield createMosaicVariations(mosaicGroup, imageData, componentLibrary, config, xTileCount, yTileCount, config.variationCount);
@@ -399,6 +602,136 @@ function createMosaic(selectedImage, componentLibrary, config, imageData) {
             figma.notify("Error creating mosaic. See console for details.");
         }
     });
+}
+// Rename this function to be more specific about what it's checking and update its parameters
+function determineTileSizeByContent(imageData, // Changed from CellData[] to CellData[][] 
+startX, startY, xTileCount, yTileCount, maxTileSize) {
+    // Default to 1x1
+    let size = 1;
+    // If we don't allow larger tiles, return 1x1
+    if (maxTileSize <= 1 || startY >= imageData.length || startX >= imageData[0].length) {
+        const cell = imageData[startY][startX];
+        return {
+            size: 1,
+            averageBrightness: cell.brightness,
+            averageColor: cell.color
+        };
+    }
+    // Check if we can create a 2x2 tile
+    if (maxTileSize >= 2 &&
+        startX + 1 < imageData[0].length &&
+        startY + 1 < imageData.length) {
+        // Get the 4 cells that would form a 2x2 tile
+        const topLeft = imageData[startY][startX];
+        const topRight = imageData[startY][startX + 1];
+        const bottomLeft = imageData[startY + 1][startX];
+        const bottomRight = imageData[startY + 1][startX + 1];
+        // Calculate the brightness variance
+        const brightnesses = [
+            topLeft.brightness,
+            topRight.brightness,
+            bottomLeft.brightness,
+            bottomRight.brightness
+        ];
+        const avgBrightness = brightnesses.reduce((sum, b) => sum + b, 0) / 4;
+        // Calculate max deviation from average brightness
+        const maxBrightnessDev = Math.max(...brightnesses.map(b => Math.abs(b - avgBrightness)));
+        // Calculate color variance
+        const avgColor = {
+            r: (topLeft.color.r + topRight.color.r + bottomLeft.color.r + bottomRight.color.r) / 4,
+            g: (topLeft.color.g + topRight.color.g + bottomLeft.color.g + bottomRight.color.g) / 4,
+            b: (topLeft.color.b + topRight.color.b + bottomLeft.color.b + bottomRight.color.b) / 4
+        };
+        const colorDevs = [
+            Math.sqrt(Math.pow(topLeft.color.r - avgColor.r, 2) +
+                Math.pow(topLeft.color.g - avgColor.g, 2) +
+                Math.pow(topLeft.color.b - avgColor.b, 2)),
+            Math.sqrt(Math.pow(topRight.color.r - avgColor.r, 2) +
+                Math.pow(topRight.color.g - avgColor.g, 2) +
+                Math.pow(topRight.color.b - avgColor.b, 2)),
+            Math.sqrt(Math.pow(bottomLeft.color.r - avgColor.r, 2) +
+                Math.pow(bottomLeft.color.g - avgColor.g, 2) +
+                Math.pow(bottomLeft.color.b - avgColor.b, 2)),
+            Math.sqrt(Math.pow(bottomRight.color.r - avgColor.r, 2) +
+                Math.pow(bottomRight.color.g - avgColor.g, 2) +
+                Math.pow(bottomRight.color.b - avgColor.b, 2))
+        ];
+        const maxColorDev = Math.max(...colorDevs);
+        // If the region is similar enough, use a 2x2 tile
+        const BRIGHTNESS_THRESHOLD = 0.1; // Max allowed brightness difference
+        const COLOR_THRESHOLD = 0.15; // Max allowed color difference
+        if (maxBrightnessDev < BRIGHTNESS_THRESHOLD && maxColorDev < COLOR_THRESHOLD) {
+            size = 2;
+            // Check if we can create a 4x4 tile
+            if (maxTileSize >= 4 &&
+                startX + 3 < imageData[0].length &&
+                startY + 3 < imageData.length) {
+                // Check if the 4x4 region is consistent
+                let consistent = true;
+                let totalBrightness = 0;
+                let totalR = 0, totalG = 0, totalB = 0;
+                let count = 0;
+                for (let y = startY; y < startY + 4; y++) {
+                    for (let x = startX; x < startX + 4; x++) {
+                        if (y >= imageData.length || x >= imageData[0].length) {
+                            consistent = false;
+                            break;
+                        }
+                        const cell = imageData[y][x];
+                        totalBrightness += cell.brightness;
+                        totalR += cell.color.r;
+                        totalG += cell.color.g;
+                        totalB += cell.color.b;
+                        count++;
+                    }
+                    if (!consistent)
+                        break;
+                }
+                if (consistent) {
+                    const avg4x4Brightness = totalBrightness / count;
+                    const avg4x4Color = {
+                        r: totalR / count,
+                        g: totalG / count,
+                        b: totalB / count
+                    };
+                    // Check all cells for consistency with the 4x4 average
+                    let isConsistent4x4 = true;
+                    for (let y = startY; y < startY + 4 && isConsistent4x4; y++) {
+                        for (let x = startX; x < startX + 4 && isConsistent4x4; x++) {
+                            const cell = imageData[y][x];
+                            const brightnessDiff = Math.abs(cell.brightness - avg4x4Brightness);
+                            const colorDiff = Math.sqrt(Math.pow(cell.color.r - avg4x4Color.r, 2) +
+                                Math.pow(cell.color.g - avg4x4Color.g, 2) +
+                                Math.pow(cell.color.b - avg4x4Color.b, 2));
+                            if (brightnessDiff > BRIGHTNESS_THRESHOLD || colorDiff > COLOR_THRESHOLD) {
+                                isConsistent4x4 = false;
+                            }
+                        }
+                    }
+                    if (isConsistent4x4) {
+                        size = 4;
+                        return {
+                            size: 4,
+                            averageBrightness: avg4x4Brightness,
+                            averageColor: avg4x4Color
+                        };
+                    }
+                }
+            }
+            return {
+                size: 2,
+                averageBrightness: avgBrightness,
+                averageColor: avgColor
+            };
+        }
+    }
+    // Return 1x1 if we can't use a larger size
+    const cell = imageData[startY][startX];
+    return {
+        size: 1,
+        averageBrightness: cell.brightness,
+        averageColor: cell.color
+    };
 }
 // Function to collect component variants
 function getComponentVariants(component, useVariants) {
@@ -457,7 +790,7 @@ function getCurrentPageComponents() {
     }
     return componentsList;
 }
-// Plugin UI message handler
+// Update the main message handler
 figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
     if (msg.type === 'get-current-page-components') {
         // Send list of components from current page to UI
@@ -485,35 +818,28 @@ figma.ui.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () {
             figma.notify('Invalid component selected');
             return;
         }
+        // Ensure column count is at least 1
+        config.columnCount = Math.max(1, config.columnCount || 32);
         // Get component variants based on configuration
         const rawComponentLibrary = getComponentVariants(component, config.useComponentVariants);
         if (rawComponentLibrary.length === 0) {
             figma.notify('No valid components found');
             return;
         }
-        // Limit variation count based on number of components
-        const effectiveVariationCount = Math.min(config.variationCount, 10);
-        if (effectiveVariationCount !== config.variationCount) {
-            console.log(`Limiting to ${effectiveVariationCount} variations for performance`);
-        }
         console.log(`Using ${rawComponentLibrary.length} component variants`);
         figma.notify(`Creating mosaic using ${rawComponentLibrary.length} component variants...`);
-        // Calculate grid size based on tile size and enlargement
-        const selectedImage = selection[0];
-        const gridWidth = Math.floor((selectedImage.width * config.enlargement) / config.tileSize);
-        const gridHeight = Math.floor((selectedImage.height * config.enlargement) / config.tileSize);
         try {
             // Show processing message
             figma.notify("Analyzing image...");
-            // Get image data using UI context processing
+            // Get image data using UI context processing with the column count grid
             console.log("Getting image data...");
-            const imageData = yield getImageData(selectedImage, { width: gridWidth, height: gridHeight }, config);
+            const imageData = yield getImageData(selection[0], config);
             // Process components to get brightness and color values
             console.log("Getting component data...");
             const componentLibrary = yield getComponentData(rawComponentLibrary, config);
             // Create the mosaic with the processed data
             console.log("Creating mosaic...");
-            yield createMosaic(selectedImage, componentLibrary, Object.assign(Object.assign({}, config), { variationCount: effectiveVariationCount }), imageData);
+            yield createMosaic(selection[0], componentLibrary, config, imageData);
         }
         catch (error) {
             console.error('Error creating mosaic:', error);
